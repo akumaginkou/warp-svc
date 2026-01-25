@@ -1,6 +1,7 @@
 #!/bin/bash
 
-set -e
+# Don't exit on error for better error handling
+set +e
 
 # Kill any existing instances of warp-svc before starting a new one
 if pkill -x warp-svc -9; then
@@ -15,7 +16,7 @@ WARP_PID=$!
 trap "echo 'Stopping warp-svc...'; kill -TERM $WARP_PID; exit" SIGTERM SIGINT
 
 # Maximum number of attempts to try the registration
-MAX_ATTEMPTS=5
+MAX_ATTEMPTS=10
 attempt_counter=0
 
 echo "Attempting to start warp-svc and register..."
@@ -42,32 +43,82 @@ else
   exit 1
 fi
 
+# Give warp-svc some more time to fully initialize
+sleep 3
+
 # Check if registration is already obtained before with warp-cli registration show
 warp-cli --accept-tos registration show &> /dev/null
-  if [[ $? -ne 0 ]]; then
-    echo "Registering service ... "
-    warp-cli --accept-tos registration new &> /dev/null
-  fi
+if [[ $? -ne 0 ]]; then
+  echo "Registering service ... "
+  # Retry registration up to 5 times with exponential backoff
+  registration_attempts=0
+  max_registration_attempts=5
+  until warp-cli --accept-tos registration new &> /dev/null; do
+    registration_attempts=$((registration_attempts + 1))
+    if [[ $registration_attempts -ge $max_registration_attempts ]]; then
+      echo "Failed to register after $max_registration_attempts attempts. Exiting."
+      kill $WARP_PID
+      exit 1
+    fi
+    wait_time=$((2 ** registration_attempts))
+    echo "Registration attempt $registration_attempts failed. Retrying in ${wait_time}s..."
+    sleep $wait_time
+  done
+  echo "Registration successful!"
+fi
 
 # Set the proxy port to 40000
-warp-cli --accept-tos proxy port 40000
+if ! warp-cli --accept-tos proxy port 40000; then
+  echo "Warning: Failed to set proxy port"
+fi
 
 # Set the mode to proxy
-warp-cli --accept-tos mode proxy
+if ! warp-cli --accept-tos mode proxy; then
+  echo "Warning: Failed to set proxy mode"
+fi
 
 # Disable DNS log
-warp-cli --accept-tos dns log disable
+warp-cli --accept-tos dns log disable 2>/dev/null || true
 
 # Set the families mode based on the value of the FAMILIES_MODE variable
-warp-cli --accept-tos dns families "${FAMILIES_MODE}"
+if ! warp-cli --accept-tos dns families "${FAMILIES_MODE}"; then
+  echo "Warning: Failed to set families mode"
+fi
 
 # Set the WARP_LICENSE if it is not empty
 if [[ -n $WARP_LICENSE ]]; then
-  warp-cli --accept-tos registration license "${WARP_LICENSE}"
+  echo "Applying WARP+ license..."
+  # Retry license application up to 3 times
+  license_attempts=0
+  max_license_attempts=3
+  until warp-cli --accept-tos registration license "${WARP_LICENSE}" &> /dev/null; do
+    license_attempts=$((license_attempts + 1))
+    if [[ $license_attempts -ge $max_license_attempts ]]; then
+      echo "Warning: Failed to apply license after $max_license_attempts attempts. Continuing without WARP+..."
+      break
+    fi
+    echo "License application attempt $license_attempts failed. Retrying in 2s..."
+    sleep 2
+  done
+  if [[ $license_attempts -lt $max_license_attempts ]]; then
+    echo "WARP+ license applied successfully!"
+  fi
 fi
 
-# Connect to the WARP service
-warp-cli --accept-tos connect
+# Connect to the WARP service with retry logic
+echo "Connecting to WARP..."
+connect_attempts=0
+max_connect_attempts=10
+until warp-cli --accept-tos connect &> /dev/null; do
+  connect_attempts=$((connect_attempts + 1))
+  if [[ $connect_attempts -ge $max_connect_attempts ]]; then
+    echo "Failed to connect after $max_connect_attempts attempts. Exiting."
+    kill $WARP_PID
+    exit 1
+  fi
+  echo "Connection attempt $connect_attempts failed. Retrying in 2s..."
+  sleep 2
+done
 
 while true; do
   # Check if warp-cli is connected
