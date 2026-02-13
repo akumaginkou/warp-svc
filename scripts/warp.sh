@@ -23,15 +23,30 @@ echo "Attempting to start warp-svc and register..."
 
 # Function to wait for warp-svc to start
 function wait_for_warp_svc {
+  # First, wait for warp-svc process to be ready
+  echo "Waiting for warp-svc process to initialize..."
+  sleep 5
+  
+  # Check if warp-cli command exists
+  if ! command -v warp-cli &> /dev/null; then
+    echo "Error: warp-cli command not found in PATH"
+    return 1
+  fi
+  
   until warp-cli --accept-tos status &> /dev/null; do
     echo "Wait for warp-svc to start... Attempt $((++attempt_counter)) of $MAX_ATTEMPTS"
-    sleep 1
+    sleep 2
     if [[ $attempt_counter -ge $MAX_ATTEMPTS ]]; then
-      echo "Failed to start warp-svc after $MAX_ATTEMPTS attempts. Exiting."
-      exit 1
+      echo "Failed to start warp-svc after $MAX_ATTEMPTS attempts."
+      echo "Debug: Checking warp-svc status..."
+      ps aux | grep warp-svc | grep -v grep || echo "warp-svc process not found"
+      echo "Debug: Trying warp-cli status directly..."
+      warp-cli --accept-tos status 2>&1 || true
+      return 1
     fi
   done
   echo "warp-svc started successfully!"
+  return 0
 }
 
 # Wait for warp-svc to start
