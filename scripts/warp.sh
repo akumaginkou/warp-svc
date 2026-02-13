@@ -3,14 +3,21 @@
 # Don't exit on error for better error handling
 set +e
 
+# Ensure /run/cloudflare-warp directory exists with correct permissions
+mkdir -p /run/cloudflare-warp
+chmod 755 /run/cloudflare-warp
+echo "Ensured /run/cloudflare-warp exists with permissions"
+
 # Kill any existing instances of warp-svc before starting a new one
 if pkill -x warp-svc -9; then
   echo "Existing warp-svc process killed."
 fi
 
-# Start warp-svc in the background and redirect output to exclude dbus messages
-warp-svc > >(grep -iv dbus) 2> >(grep -iv dbus >&2) &
+# Start warp-svc in the background with full logging
+# Don't filter output - we need to see all errors for debugging
+warp-svc &
 WARP_PID=$!
+echo "Started warp-svc with PID $WARP_PID"
 
 # Trap SIGTERM and SIGINT, and forward those signals to the warp-svc process
 trap "echo 'Stopping warp-svc...'; kill -TERM $WARP_PID; exit" SIGTERM SIGINT
