@@ -23,12 +23,35 @@ echo "Available at /run: $(ls -la /run | head -5)"
 echo "Warp-svc location: $(which warp-svc)"
 echo "=========================="
 
-# Start warp-svc in background with RUST_LOG for debugging
+# Check network and DNS connectivity before starting warp-svc
+echo "=== Network Diagnostics ==="
+echo "Resolving 1.1.1.1 (cloudflare.com):"
+nslookup 1.1.1.1 2>&1 | head -5
+echo "Checking network interfaces:"
+ip link show 2>/dev/null | grep -E "^[0-9]|state" | head -10
+echo "Checking routes:"
+ip route show 2>/dev/null | head -5
+echo "DNS config:"
+cat /etc/resolv.conf 2>/dev/null | head -5
+echo "============================"
+
+# Start warp-svc with enhanced debugging
+# Use strace to capture system calls if available, otherwise just run normally
 export RUST_LOG=debug
-warp-svc 2>&1 | tee /tmp/warp-svc.log &
+export RUST_BACKTRACE=full
+
+if command -v strace &>/dev/null; then
+  echo "Starting warp-svc with strace for system call tracing..."
+  strace -f -o /tmp/warp-svc.strace -e trace=socket,connect,bind warp-svc 2>&1 | tee /tmp/warp-svc.log &
+else
+  echo "strace not available, running warp-svc directly..."
+  warp-svc 2>&1 | tee /tmp/warp-svc.log &
+fi
 WARP_PID=$!
 echo "Started warp-svc with PID $WARP_PID, logging to /tmp/warp-svc.log"
-sleep 2
+
+# Wait longer for initialization
+sleep 3
 
 # Trap SIGTERM and SIGINT, and forward those signals to the warp-svc process
 trap "echo 'Stopping warp-svc...'; kill -TERM $WARP_PID; exit" SIGTERM SIGINT
@@ -79,8 +102,30 @@ function wait_for_warp_svc {
   echo "Socket exists: $(test -S "$socket_path" && echo 'Yes' || echo 'No')"
   echo "Socket directory: $(ls -la /run/cloudflare-warp 2>/dev/null || echo 'Directory not found')"
   echo "Warp-cli test: $(warp-cli --accept-tos status 2>&1 || true)"
+  
+  echo ""
+  echo "=== warp-svc Exit Status ==="
+  ps aux | grep -i warp-svc | grep -v grep || echo "No warp-svc process found"
+  
+  echo ""
+  echo "=== System Capabilities ==="
+  echo "UID/GID: $(id)"
+  echo "Seccomp: $(cat /proc/self/status 2>/dev/null | grep Seccomp || echo 'N/A')"
+  
+  echo ""
+  echo "=== Network Status ==="
+  nslookup 1.1.1.1 2>&1 | head -3 || echo "DNS lookup failed"
+  
+  echo ""
   echo "=== Last 50 lines of warp-svc log ==="
   tail -50 /tmp/warp-svc.log 2>/dev/null || echo "Log file not found"
+  
+  if [[ -f /tmp/warp-svc.strace ]]; then
+    echo ""
+    echo "=== strace socket/connect calls ==="
+    grep -E "socket|connect|bind" /tmp/warp-svc.strace 2>/dev/null | tail -15
+  fi
+  
   echo "=============================="
   return 1
 }
