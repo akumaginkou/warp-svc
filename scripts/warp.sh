@@ -35,14 +35,29 @@ echo "DNS config:"
 cat /etc/resolv.conf 2>/dev/null | head -5
 echo "============================"
 
+# Fix Docker DNS issue - Docker's internal DNS may fail
+echo "Attempting to fix DNS resolution..."
+if command -v nscd &>/dev/null; then
+  nscd -i hosts 2>/dev/null || true
+fi
+
+# If Docker DNS (127.0.0.11) fails, add fallback nameservers
+if ! timeout 3 nslookup 1.1.1.1 &>/dev/null 2>&1; then
+  echo "Docker DNS not responding. Adding public DNS fallback..."
+  if ! grep -q "nameserver 8.8.8.8" /etc/resolv.conf; then
+    echo "nameserver 8.8.8.8" >> /etc/resolv.conf
+    echo "nameserver 8.8.4.4" >> /etc/resolv.conf
+  fi
+fi
+
 # Start warp-svc with enhanced debugging
-# Use strace to capture system calls if available, otherwise just run normally
 export RUST_LOG=debug
 export RUST_BACKTRACE=full
 
 if command -v strace &>/dev/null; then
   echo "Starting warp-svc with strace for system call tracing..."
-  strace -f -o /tmp/warp-svc.strace -e trace=socket,connect,bind warp-svc 2>&1 | tee /tmp/warp-svc.log &
+  # Include AF_UNIX socket operations (socket, bind, listen, connect)
+  strace -f -o /tmp/warp-svc.strace -e trace=socket,connect,bind,listen -e trace=open,openat warp-svc 2>&1 | tee /tmp/warp-svc.log &
 else
   echo "strace not available, running warp-svc directly..."
   warp-svc 2>&1 | tee /tmp/warp-svc.log &
@@ -102,30 +117,38 @@ function wait_for_warp_svc {
   echo "Socket exists: $(test -S "$socket_path" && echo 'Yes' || echo 'No')"
   echo "Socket directory: $(ls -la /run/cloudflare-warp 2>/dev/null || echo 'Directory not found')"
   echo "Warp-cli test: $(warp-cli --accept-tos status 2>&1 || true)"
-  
+
   echo ""
   echo "=== warp-svc Exit Status ==="
   ps aux | grep -i warp-svc | grep -v grep || echo "No warp-svc process found"
-  
+
   echo ""
   echo "=== System Capabilities ==="
   echo "UID/GID: $(id)"
   echo "Seccomp: $(cat /proc/self/status 2>/dev/null | grep Seccomp || echo 'N/A')"
-  
+
   echo ""
   echo "=== Network Status ==="
   nslookup 1.1.1.1 2>&1 | head -3 || echo "DNS lookup failed"
-  
+
   echo ""
   echo "=== Last 50 lines of warp-svc log ==="
   tail -50 /tmp/warp-svc.log 2>/dev/null || echo "Log file not found"
-  
+
   if [[ -f /tmp/warp-svc.strace ]]; then
     echo ""
-    echo "=== strace socket/connect calls ==="
-    grep -E "socket|connect|bind" /tmp/warp-svc.strace 2>/dev/null | tail -15
+    echo "=== strace socket/connect/bind calls ==="
+    grep -E "socket|connect|bind|listen|openat.*cloudflare" /tmp/warp-svc.strace 2>/dev/null | tail -30 || echo "No relevant calls found"
+    
+    echo ""
+    echo "=== strace search for AF_UNIX attempts ==="
+    grep -i "AF_UNIX\|unix" /tmp/warp-svc.strace 2>/dev/null | head -10 || echo "No AF_UNIX operations found"
+    
+    echo ""
+    echo "=== strace errors ==="
+    grep " = -1 " /tmp/warp-svc.strace 2>/dev/null | tail -10 || echo "No errors found"
   fi
-  
+
   echo "=============================="
   return 1
 }
