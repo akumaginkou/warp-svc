@@ -23,30 +23,44 @@ echo "Attempting to start warp-svc and register..."
 
 # Function to wait for warp-svc to start
 function wait_for_warp_svc {
-  # First, wait for warp-svc process to be ready
-  echo "Waiting for warp-svc process to initialize..."
-  sleep 5
-  
+  echo "Waiting for warp-svc Unix socket to be ready..."
+
   # Check if warp-cli command exists
   if ! command -v warp-cli &> /dev/null; then
-    echo "Error: warp-cli command not found in PATH"
+    echo "Error: warp-cli command not found"
+    which warp-cli || echo "warp-cli not in PATH"
     return 1
   fi
-  
-  until warp-cli --accept-tos status &> /dev/null; do
-    echo "Wait for warp-svc to start... Attempt $((++attempt_counter)) of $MAX_ATTEMPTS"
-    sleep 2
-    if [[ $attempt_counter -ge $MAX_ATTEMPTS ]]; then
-      echo "Failed to start warp-svc after $MAX_ATTEMPTS attempts."
-      echo "Debug: Checking warp-svc status..."
-      ps aux | grep warp-svc | grep -v grep || echo "warp-svc process not found"
-      echo "Debug: Trying warp-cli status directly..."
-      warp-cli --accept-tos status 2>&1 || true
-      return 1
+
+  # Wait for Unix socket to be created
+  local socket_path="/run/cloudflare-warp/warp_service"
+  for i in {1..20}; do
+    if [[ -S "$socket_path" ]]; then
+      echo "Unix socket found at $socket_path"
+      break
     fi
+    echo "Waiting for Unix socket ($i/20)..."
+    sleep 1
   done
-  echo "warp-svc started successfully!"
-  return 0
+
+  # Try to communicate with warp-cli
+  local max_attempts=15
+  for i in $(seq 1 $max_attempts); do
+    if warp-cli --accept-tos status &>/dev/null; then
+      echo "warp-svc started successfully!"
+      return 0
+    fi
+    echo "Attempt $i/$max_attempts: warp-cli not responding..."
+    echo "Debug: $(warp-cli --accept-tos status 2>&1 || true)"
+    sleep 2
+  done
+
+  echo "Failed to start warp-svc after $max_attempts attempts"
+  echo "Debug info:"
+  echo "Process check: $(pgrep -f warp-svc | head -1 || echo 'warp-svc not running')"
+  echo "Socket exists: $(test -S "$socket_path" && echo 'Yes' || echo 'No')"
+  echo "Warp-cli test: $(warp-cli --accept-tos status 2>&1 || true)"
+  return 1
 }
 
 # Wait for warp-svc to start
