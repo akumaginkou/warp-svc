@@ -5,19 +5,30 @@ set +e
 
 # Ensure /run/cloudflare-warp directory exists with correct permissions
 mkdir -p /run/cloudflare-warp
-chmod 755 /run/cloudflare-warp
-echo "Ensured /run/cloudflare-warp exists with permissions"
+chmod 777 /run/cloudflare-warp
+echo "Ensured /run/cloudflare-warp exists with full permissions"
+
+# Also ensure /run directory itself is writable
+chmod 777 /run 2>/dev/null || true
 
 # Kill any existing instances of warp-svc before starting a new one
 if pkill -x warp-svc -9; then
   echo "Existing warp-svc process killed."
 fi
 
-# Start warp-svc in the background with full logging
-# Don't filter output - we need to see all errors for debugging
-warp-svc &
+# Log system capabilities and environment
+echo "=== System Information ==="
+echo "UID: $(id -u), GID: $(id -g)"
+echo "Available at /run: $(ls -la /run | head -5)"
+echo "Warp-svc location: $(which warp-svc)"
+echo "=========================="
+
+# Start warp-svc in background with RUST_LOG for debugging
+export RUST_LOG=debug
+warp-svc 2>&1 | tee /tmp/warp-svc.log &
 WARP_PID=$!
-echo "Started warp-svc with PID $WARP_PID"
+echo "Started warp-svc with PID $WARP_PID, logging to /tmp/warp-svc.log"
+sleep 2
 
 # Trap SIGTERM and SIGINT, and forward those signals to the warp-svc process
 trap "echo 'Stopping warp-svc...'; kill -TERM $WARP_PID; exit" SIGTERM SIGINT
@@ -63,10 +74,14 @@ function wait_for_warp_svc {
   done
 
   echo "Failed to start warp-svc after $max_attempts attempts"
-  echo "Debug info:"
+  echo "=== Detailed Debug Info ==="
   echo "Process check: $(pgrep -f warp-svc | head -1 || echo 'warp-svc not running')"
   echo "Socket exists: $(test -S "$socket_path" && echo 'Yes' || echo 'No')"
+  echo "Socket directory: $(ls -la /run/cloudflare-warp 2>/dev/null || echo 'Directory not found')"
   echo "Warp-cli test: $(warp-cli --accept-tos status 2>&1 || true)"
+  echo "=== Last 50 lines of warp-svc log ==="
+  tail -50 /tmp/warp-svc.log 2>/dev/null || echo "Log file not found"
+  echo "=============================="
   return 1
 }
 
