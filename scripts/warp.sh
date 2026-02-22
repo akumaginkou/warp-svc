@@ -4,10 +4,17 @@
 set +e
 
 # Increase file descriptor limits for QNAP (handle many concurrent connections)
-ulimit -n 8192
-ulimit -u 2048
-echo "File descriptor limits set to: $(ulimit -n)"
-echo "Process limits set to: $(ulimit -u)"
+# ⚠️ NOTE: ulimits are now set at Docker Compose level via 'ulimits' directive
+# Attempting to change limits here will fail with EPERM in restricted environments
+# Only try if running outside Docker or in permissive environments
+if [[ -w /proc/sys/fs/file-max ]]; then
+  ulimit -n 65536 2>/dev/null || true
+  ulimit -u 4096 2>/dev/null || true
+  echo "File descriptor limits set to: $(ulimit -n)"
+  echo "Process limits set to: $(ulimit -u)"
+else
+  echo "Running in restricted environment (Docker). Using Docker-configured ulimits."
+fi
 
 # Ensure /run/cloudflare-warp directory exists with correct permissions
 mkdir -p /run/cloudflare-warp
