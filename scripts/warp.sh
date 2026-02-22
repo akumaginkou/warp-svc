@@ -78,27 +78,29 @@ for attempt in 1 2 3; do
 done
 
 # Start warp-svc with enhanced debugging
+# エラーは常に詳細出力（RUST_LOG=debug, RUST_BACKTRACE=full）
 export RUST_LOG=debug
 export RUST_BACKTRACE=full
 
-# Enable backtrace output if WARP_ENABLE_BACKTRACE is set
+# Enable strace if WARP_ENABLE_BACKTRACE is set
 if [[ "${WARP_ENABLE_BACKTRACE:-0}" == "1" ]]; then
-  echo "Backtrace output enabled (WARP_ENABLE_BACKTRACE=1)"
+  echo "strace tracing enabled (WARP_ENABLE_BACKTRACE=1)"
   if command -v strace &>/dev/null; then
     echo "Starting warp-svc with strace for system call tracing..."
     # Include AF_UNIX socket operations (socket, bind, listen, connect)
     strace -f -o /tmp/warp-svc.strace -e trace=socket,connect,bind,listen -e trace=open,openat warp-svc 2>&1 | tee /tmp/warp-svc.log &
   else
-    echo "strace not available, running warp-svc directly..."
+    echo "strace not available, running warp-svc with detailed logging..."
     warp-svc 2>&1 | tee /tmp/warp-svc.log &
   fi
   WARP_PID=$!
-  echo "Started warp-svc with PID $WARP_PID, logging to /tmp/warp-svc.log"
+  echo "Started warp-svc with PID $WARP_PID, logging to /tmp/warp-svc.log (strace mode)"
 else
-  echo "Backtrace output disabled (set WARP_ENABLE_BACKTRACE=1 to enable)"
-  warp-svc > /tmp/warp-svc.log 2>&1 &
+  echo "Normal mode: errors and logs will be shown (set WARP_ENABLE_BACKTRACE=1 for strace)"
+  # エラーも画面に表示しながらログファイルにも保存
+  warp-svc 2>&1 | tee /tmp/warp-svc.log &
   WARP_PID=$!
-  echo "Started warp-svc with PID $WARP_PID, logging to /tmp/warp-svc.log (quiet mode)"
+  echo "Started warp-svc with PID $WARP_PID, logging to /tmp/warp-svc.log"
 fi
 
 # Wait longer for initialization
