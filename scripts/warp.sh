@@ -3,6 +3,12 @@
 # Don't exit on error for better error handling
 set +e
 
+# Increase file descriptor limits for QNAP (handle many concurrent connections)
+ulimit -n 8192
+ulimit -u 2048
+echo "File descriptor limits set to: $(ulimit -n)"
+echo "Process limits set to: $(ulimit -u)"
+
 # Ensure /run/cloudflare-warp directory exists with correct permissions
 mkdir -p /run/cloudflare-warp
 chmod 777 /run/cloudflare-warp
@@ -41,14 +47,28 @@ if command -v nscd &>/dev/null; then
   nscd -i hosts 2>/dev/null || true
 fi
 
-# If Docker DNS (127.0.0.11) fails, add fallback nameservers
-if ! timeout 3 nslookup 1.1.1.1 &>/dev/null 2>&1; then
-  echo "Docker DNS not responding. Adding public DNS fallback..."
-  if ! grep -q "nameserver 8.8.8.8" /etc/resolv.conf; then
-    echo "nameserver 8.8.8.8" >> /etc/resolv.conf
-    echo "nameserver 8.8.4.4" >> /etc/resolv.conf
-  fi
+# Flush DNS cache on QNAP and other systems
+if command -v systemctl &>/dev/null; then
+  systemctl restart systemd-resolved 2>/dev/null || true
 fi
+
+# Multiple attempts to detect DNS failure with longer timeout for QNAP
+echo "Testing DNS resolution (attempt 1/3)..."
+for attempt in 1 2 3; do
+  if timeout 5 nslookup 1.1.1.1 8.8.8.8 &>/dev/null 2>&1; then
+    echo "DNS resolution successful on attempt $attempt"
+    break
+  elif [[ $attempt -eq 3 ]]; then
+    echo "Docker DNS not responding or too slow. Adding public DNS fallback..."
+    # Backup original resolv.conf if needed
+    [[ -f /etc/resolv.conf.bak ]] || cp /etc/resolv.conf /etc/resolv.conf.bak 2>/dev/null
+    if ! grep -q "nameserver 8.8.8.8" /etc/resolv.conf 2>/dev/null; then
+      echo "nameserver 8.8.8.8" >> /etc/resolv.conf
+      echo "nameserver 1.1.1.1" >> /etc/resolv.conf
+    fi
+  fi
+  [[ $attempt -lt 3 ]] && sleep 1
+done
 
 # Start warp-svc with enhanced debugging
 export RUST_LOG=debug
@@ -139,11 +159,11 @@ function wait_for_warp_svc {
     echo ""
     echo "=== strace socket/connect/bind calls ==="
     grep -E "socket|connect|bind|listen|openat.*cloudflare" /tmp/warp-svc.strace 2>/dev/null | tail -30 || echo "No relevant calls found"
-    
+
     echo ""
     echo "=== strace search for AF_UNIX attempts ==="
     grep -i "AF_UNIX\|unix" /tmp/warp-svc.strace 2>/dev/null | head -10 || echo "No AF_UNIX operations found"
-    
+
     echo ""
     echo "=== strace errors ==="
     grep " = -1 " /tmp/warp-svc.strace 2>/dev/null | tail -10 || echo "No errors found"
@@ -162,8 +182,10 @@ else
   exit 1
 fi
 
-# Give warp-svc some more time to fully initialize
-sleep 3
+# Give warp-svc more time to fully initialize and setup QUIC connections
+# QNAP: Extended from 3s to account for slower hardware
+echo "Waiting for proxy port to be ready..."
+sleep 5
 
 # Check if registration is already obtained before with warp-cli registration show
 warp-cli --accept-tos registration show &> /dev/null
@@ -224,10 +246,10 @@ if [[ -n $WARP_LICENSE ]]; then
   fi
 fi
 
-# Connect to the WARP service with retry logic
+# Connect to the WARP service with retry logic (increased retries for QNAP)
 echo "Connecting to WARP..."
 connect_attempts=0
-max_connect_attempts=10
+max_connect_attempts=20  # Increased from 10 to handle QNAP network latency
 until warp-cli --accept-tos connect &> /dev/null; do
   connect_attempts=$((connect_attempts + 1))
   if [[ $connect_attempts -ge $max_connect_attempts ]]; then
@@ -235,8 +257,10 @@ until warp-cli --accept-tos connect &> /dev/null; do
     kill $WARP_PID
     exit 1
   fi
-  echo "Connection attempt $connect_attempts failed. Retrying in 2s..."
-  sleep 2
+  # Exponential backoff: wait longer between retries
+  wait_time=$((connect_attempts * 2))
+  echo "Connection attempt $connect_attempts failed. Retrying in ${wait_time}s..."
+  sleep $wait_time
 done
 
 while true; do
