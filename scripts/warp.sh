@@ -81,16 +81,25 @@ done
 export RUST_LOG=debug
 export RUST_BACKTRACE=full
 
-if command -v strace &>/dev/null; then
-  echo "Starting warp-svc with strace for system call tracing..."
-  # Include AF_UNIX socket operations (socket, bind, listen, connect)
-  strace -f -o /tmp/warp-svc.strace -e trace=socket,connect,bind,listen -e trace=open,openat warp-svc 2>&1 | tee /tmp/warp-svc.log &
+# Enable backtrace output if WARP_ENABLE_BACKTRACE is set
+if [[ "${WARP_ENABLE_BACKTRACE:-0}" == "1" ]]; then
+  echo "Backtrace output enabled (WARP_ENABLE_BACKTRACE=1)"
+  if command -v strace &>/dev/null; then
+    echo "Starting warp-svc with strace for system call tracing..."
+    # Include AF_UNIX socket operations (socket, bind, listen, connect)
+    strace -f -o /tmp/warp-svc.strace -e trace=socket,connect,bind,listen -e trace=open,openat warp-svc 2>&1 | tee /tmp/warp-svc.log &
+  else
+    echo "strace not available, running warp-svc directly..."
+    warp-svc 2>&1 | tee /tmp/warp-svc.log &
+  fi
+  WARP_PID=$!
+  echo "Started warp-svc with PID $WARP_PID, logging to /tmp/warp-svc.log"
 else
-  echo "strace not available, running warp-svc directly..."
-  warp-svc 2>&1 | tee /tmp/warp-svc.log &
+  echo "Backtrace output disabled (set WARP_ENABLE_BACKTRACE=1 to enable)"
+  warp-svc > /tmp/warp-svc.log 2>&1 &
+  WARP_PID=$!
+  echo "Started warp-svc with PID $WARP_PID, logging to /tmp/warp-svc.log (quiet mode)"
 fi
-WARP_PID=$!
-echo "Started warp-svc with PID $WARP_PID, logging to /tmp/warp-svc.log"
 
 # Wait longer for initialization
 sleep 3
